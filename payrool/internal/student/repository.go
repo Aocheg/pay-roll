@@ -134,3 +134,44 @@ func (r *Repository) List() ([]Student, error) {
 
 	return students, nil
 }
+
+func (r *Repository) Update(s Student) error {
+	query := `
+		UPDATE students
+		SET
+			student_no = ?,
+			full_name = ?,
+			email = ?,
+			phone = ?,
+			program = ?,
+			daily_rate = ?,
+			active = ?
+		WHERE id = ?
+	`
+
+	_, err := r.db.Exec(
+		query,
+		s.StudentNo,
+		s.FullName,
+		s.Email,
+		s.Phone,
+		s.Program,
+		s.DailyRate,
+		s.Active,
+		s.ID,
+	)
+
+	return err
+}
+
+func (r *Repository) Deactivate(id int) error {
+	query := `
+		UPDATE students
+		SET active = 0
+		WHERE id = ?
+	`
+
+	_, err := r.db.Exec(query, id)
+
+	return err
+}

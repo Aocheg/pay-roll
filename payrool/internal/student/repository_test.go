@@ -216,3 +216,124 @@ func TestRepositoryList(t *testing.T) {
 		)
 	}
 }
+
+func TestRepositoryUpdate(t *testing.T) {
+	db := testDatabase(t)
+
+	repo := NewRepository(db)
+
+	student := Student{
+		StudentNo: "STU001",
+		FullName:  "John Doe",
+		Email:     "john@example.com",
+		Phone:     "08012345678",
+		Program:   "Software Engineering",
+		DailyRate: 5000,
+		Active:    true,
+	}
+
+	id, err := repo.Create(student)
+	if err != nil {
+		t.Fatalf("failed to create student: %v", err)
+	}
+
+	student.ID = int(id)
+	student.FullName = "John Updated"
+	student.Email = "john.updated@example.com"
+	student.Phone = "08111111111"
+	student.Program = "Backend Engineering"
+	student.DailyRate = 7000
+
+	err = repo.Update(student)
+	if err != nil {
+		t.Fatalf("failed to update student: %v", err)
+	}
+
+	updated, err := repo.GetByID(int(id))
+	if err != nil {
+		t.Fatalf("failed to retrieve updated student: %v", err)
+	}
+
+	if updated.FullName != "John Updated" {
+		t.Fatalf(
+			"expected updated name %q, got %q",
+			"John Updated",
+			updated.FullName,
+		)
+	}
+
+	if updated.Email != "john.updated@example.com" {
+		t.Fatalf(
+			"expected updated email %q, got %q",
+			"john.updated@example.com",
+			updated.Email,
+		)
+	}
+
+	if updated.Phone != "08111111111" {
+		t.Fatalf(
+			"expected updated phone %q, got %q",
+			"08111111111",
+			updated.Phone,
+		)
+	}
+
+	if updated.Program != "Backend Engineering" {
+		t.Fatalf(
+			"expected updated program %q, got %q",
+			"Backend Engineering",
+			updated.Program,
+		)
+	}
+
+	if updated.DailyRate != 7000 {
+		t.Fatalf(
+			"expected updated daily rate %.2f, got %.2f",
+			7000.0,
+			updated.DailyRate,
+		)
+	}
+}
+
+func TestRepositoryDeactivate(t *testing.T) {
+	db := testDatabase(t)
+
+	repo := NewRepository(db)
+
+	student := Student{
+		StudentNo: "STU004",
+		FullName:  "Michael Johnson",
+		Email:     "michael@example.com",
+		Phone:     "08055555555",
+		Program:   "Software Engineering",
+		DailyRate: 5000,
+		Active:    true,
+	}
+
+	id, err := repo.Create(student)
+	if err != nil {
+		t.Fatalf("failed to create student: %v", err)
+	}
+
+	err = repo.Deactivate(int(id))
+	if err != nil {
+		t.Fatalf("failed to deactivate student: %v", err)
+	}
+
+	found, err := repo.GetByID(int(id))
+	if err != nil {
+		t.Fatalf("failed to retrieve deactivated student: %v", err)
+	}
+
+	if found.ID != int(id) {
+		t.Fatalf(
+			"expected student ID %d, got %d",
+			id,
+			found.ID,
+		)
+	}
+
+	if found.Active {
+		t.Fatal("expected student to be inactive after deactivation")
+	}
+}
