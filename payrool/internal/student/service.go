@@ -84,3 +84,4 @@ func (s *Service) DeactivateStudent(id int) error {
 
 	return s.repo.Deactivate(id)
 }
+
