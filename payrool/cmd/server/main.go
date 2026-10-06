@@ -1,134 +1,84 @@
-package user
+package database
 
 import (
-	"encoding/json"
-	"net/http"
-	"strconv"
-	"strings"
+	"database/sql"
+	"fmt"
+
+	_ "modernc.org/sqlite"
 )
 
-type Handler struct {
-	service *Service
-}
-
-type registerRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	FullName string `json:"full_name"`
-	Email    string `json:"email"`
-	Role     string `json:"role"`
-}
-
-type loginRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
-type registerResponse struct {
-	ID int64 `json:"id"`
-}
-
-type loginResponse struct {
-	Username string `json:"username"`
-	Role     string `json:"role"`
-	FullName string `json:"full_name"`
-}
-
-func NewHandler(service *Service) *Handler {
-	return &Handler{service: service}
-}
-
-func (h *Handler) RegisterUser(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var request registerRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	user := User{
-		Username: request.Username,
-		FullName: request.FullName,
-		Email:    request.Email,
-		Role:     request.Role,
-	}
-
-	id, err := h.service.RegisterUser(user, request.Password)
+func Open() (*sql.DB, error) {
+	db, err := sql.Open("sqlite", "payrool.db")
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+		return nil, err
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(registerResponse{ID: id})
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	fmt.Println("Database connection successful")
+	return db, nil
 }
 
-func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+func CreateTables(db *sql.DB) error {
+	query := `
+	CREATE TABLE IF NOT EXISTS students (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		student_no TEXT NOT NULL UNIQUE,
+		full_name TEXT NOT NULL,
+		email TEXT,
+		phone TEXT,
+		program TEXT,
+		daily_rate REAL NOT NULL,
+		active INTEGER NOT NULL DEFAULT 1
+	);
 
-	var request loginRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
+	CREATE TABLE IF NOT EXISTS attendance (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		student_id INTEGER NOT NULL,
+		attendance_date TEXT NOT NULL,
+		status TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		UNIQUE(student_id, attendance_date),
+		FOREIGN KEY(student_id) REFERENCES students(id)
+	);
 
-	u, err := h.service.Login(request.Username, request.Password)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
-		return
-	}
+	CREATE TABLE IF NOT EXISTS payroll (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		student_id INTEGER NOT NULL,
+		period_start TEXT NOT NULL,
+		period_end TEXT NOT NULL,
+		expected_days INTEGER NOT NULL,
+		present_days INTEGER NOT NULL,
+		attendance_percentage REAL NOT NULL,
+		eligible INTEGER NOT NULL,
+		daily_rate REAL NOT NULL,
+		payable_days INTEGER NOT NULL,
+		gross_amount REAL NOT NULL,
+		payment_status TEXT NOT NULL DEFAULT 'pending',
+		processed_at TEXT,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		UNIQUE(student_id, period_start, period_end),
+		FOREIGN KEY(student_id) REFERENCES students(id)
+	);
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(loginResponse{
-		Username: u.Username,
-		Role:     u.Role,
-		FullName: u.FullName,
-	})
-}
+	CREATE TABLE IF NOT EXISTS users (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		username TEXT NOT NULL UNIQUE,
+		password_hash TEXT NOT NULL,
+		full_name TEXT NOT NULL,
+		email TEXT,
+		role TEXT NOT NULL DEFAULT 'staff',
+		active INTEGER NOT NULL DEFAULT 1,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);
+	`
 
-func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	users, err := h.service.ListUsers()
-	if err != nil {
-		http.Error(w, "failed to retrieve users", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(users)
-}
-
-func (h *Handler) GetUser(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	idText := strings.TrimPrefix(r.URL.Path, "/api/users/")
-	id, err := strconv.Atoi(idText)
-	if err != nil || id <= 0 {
-		http.Error(w, "invalid user ID", http.StatusBadRequest)
-		return
-	}
-
-	u, err := h.service.GetUser(id)
-	if err != nil {
-		http.Error(w, "user not found", http.StatusNotFound)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(u)
+	_, err := db.Exec(query)
+	return err
 }

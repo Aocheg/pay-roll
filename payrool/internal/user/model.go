@@ -1,193 +1,145 @@
-package user
+package auth
 
-import "database/sql"
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"strings"
+	"time"
 
-type Repository struct {
-	db *sql.DB
+	"payrool/internal/user"
+)
+
+const DefaultSecret = "payrool-dev-secret"
+
+const (
+	RoleAdmin             = "admin"
+	RoleManager           = "manager"
+	RoleAttendanceOfficer = "attendance_officer"
+	RoleStaff             = "staff"
+)
+
+type Claims struct {
+	UserID   int    `json:"user_id"`
+	Username string `json:"username"`
+	Role     string `json:"role"`
+	Exp      int64  `json:"exp"`
 }
 
-func NewRepository(db *sql.DB) *Repository {
-	return &Repository{db: db}
+func secret() string {
+	if s := strings.TrimSpace(os.Getenv("PAYROOL_JWT_SECRET")); s != "" {
+		return s
+	}
+	return DefaultSecret
 }
 
-func (r *Repository) Create(u User) (int64, error) {
-	query := `
-		INSERT INTO users (
-			username,
-			password_hash,
-			full_name,
-			email,
-			role,
-			active,
-			created_at,
-			updated_at
-		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`
+func GenerateToken(u user.User) (string, error) {
+	claims := Claims{
+		UserID:   u.ID,
+		Username: u.Username,
+		Role:     u.Role,
+		Exp:      time.Now().Add(8 * time.Hour).Unix(),
+	}
 
-	result, err := r.db.Exec(
-		query,
-		u.Username,
-		u.PasswordHash,
-		u.FullName,
-		u.Email,
-		u.Role,
-		u.Active,
-		u.CreatedAt,
-		u.UpdatedAt,
-	)
+	payload, err := json.Marshal(claims)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
 
-	id, err := result.LastInsertId()
+	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
+	signature := hmac.New(sha256.New, []byte(secret()))
+	_, err = signature.Write([]byte(encodedPayload))
 	if err != nil {
-		return 0, err
+		return "", err
 	}
 
-	return id, nil
+	mac := base64.RawURLEncoding.EncodeToString(signature.Sum(nil))
+	return encodedPayload + "." + mac, nil
 }
 
-func (r *Repository) GetByID(id int) (User, error) {
-	query := `
-		SELECT
-			id,
-			username,
-			password_hash,
-			full_name,
-			email,
-			role,
-			active,
-			created_at,
-			updated_at
-		FROM users
-		WHERE id = ?
-	`
-
-	var u User
-	if err := r.db.QueryRow(query, id).Scan(
-		&u.ID,
-		&u.Username,
-		&u.PasswordHash,
-		&u.FullName,
-		&u.Email,
-		&u.Role,
-		&u.Active,
-		&u.CreatedAt,
-		&u.UpdatedAt,
-	); err != nil {
-		return User{}, err
+func ParseToken(token string) (Claims, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return Claims{}, errors.New("missing token")
 	}
 
-	return u, nil
-}
-
-func (r *Repository) GetByUsername(username string) (User, error) {
-	query := `
-		SELECT
-			id,
-			username,
-			password_hash,
-			full_name,
-			email,
-			role,
-			active,
-			created_at,
-			updated_at
-		FROM users
-		WHERE username = ?
-	`
-
-	var u User
-	if err := r.db.QueryRow(query, username).Scan(
-		&u.ID,
-		&u.Username,
-		&u.PasswordHash,
-		&u.FullName,
-		&u.Email,
-		&u.Role,
-		&u.Active,
-		&u.CreatedAt,
-		&u.UpdatedAt,
-	); err != nil {
-		return User{}, err
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 {
+		return Claims{}, errors.New("invalid token format")
 	}
 
-	return u, nil
-}
+	encodedPayload := parts[0]
+	providedMAC := parts[1]
 
-func (r *Repository) List() ([]User, error) {
-	query := `
-		SELECT
-			id,
-			username,
-			password_hash,
-			full_name,
-			email,
-			role,
-			active,
-			created_at,
-			updated_at
-		FROM users
-		ORDER BY id ASC
-	`
-
-	rows, err := r.db.Query(query)
+	signature := hmac.New(sha256.New, []byte(secret()))
+	_, err := signature.Write([]byte(encodedPayload))
 	if err != nil {
-		return nil, err
+		return Claims{}, err
 	}
-	defer rows.Close()
 
-	users := make([]User, 0)
-	for rows.Next() {
-		var u User
-		if err := rows.Scan(
-			&u.ID,
-			&u.Username,
-			&u.PasswordHash,
-			&u.FullName,
-			&u.Email,
-			&u.Role,
-			&u.Active,
-			&u.CreatedAt,
-			&u.UpdatedAt,
-		); err != nil {
-			return nil, err
+	expectedMAC := base64.RawURLEncoding.EncodeToString(signature.Sum(nil))
+	if !hmac.Equal([]byte(expectedMAC), []byte(providedMAC)) {
+		return Claims{}, errors.New("invalid token signature")
+	}
+
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(encodedPayload)
+	if err != nil {
+		return Claims{}, err
+	}
+
+	var claims Claims
+	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+		return Claims{}, err
+	}
+
+	if claims.Exp == 0 || time.Now().Unix() > claims.Exp {
+		return Claims{}, errors.New("token expired")
+	}
+
+	return claims, nil
+}
+
+func RequireRole(requiredRoles ...string) func(http.HandlerFunc) http.HandlerFunc {
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			authorization := strings.TrimSpace(r.Header.Get("Authorization"))
+			if authorization == "" {
+				http.Error(w, "missing authorization header", http.StatusUnauthorized)
+				return
+			}
+
+			parts := strings.SplitN(authorization, " ", 2)
+			if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+				http.Error(w, "invalid authorization header", http.StatusUnauthorized)
+				return
+			}
+
+			claims, err := ParseToken(parts[1])
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusUnauthorized)
+				return
+			}
+
+			if len(requiredRoles) > 0 {
+				allowed := false
+				for _, required := range requiredRoles {
+					if strings.EqualFold(claims.Role, required) {
+						allowed = true
+						break
+					}
+				}
+				if !allowed {
+					http.Error(w, fmt.Sprintf("requires one of: %s", strings.Join(requiredRoles, ", ")), http.StatusForbidden)
+					return
+				}
+			}
+
+			next(w, r)
 		}
-		users = append(users, u)
 	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return users, nil
-}
-
-func (r *Repository) Update(u User) error {
-	query := `
-		UPDATE users
-		SET
-			username = ?,
-			password_hash = ?,
-			full_name = ?,
-			email = ?,
-			role = ?,
-			active = ?,
-			updated_at = ?
-		WHERE id = ?
-	`
-
-	_, err := r.db.Exec(
-		query,
-		u.Username,
-		u.PasswordHash,
-		u.FullName,
-		u.Email,
-		u.Role,
-		u.Active,
-		u.UpdatedAt,
-		u.ID,
-	)
-	return err
 }

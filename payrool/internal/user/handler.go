@@ -50,26 +50,31 @@ func (s *Service) RegisterUser(u User, password string) (int64, error) {
 	return s.repo.Create(u)
 }
 
-func (s *Service) Login(username, password string) (User, error) {
+func (s *Service) Login(username, password string) (User, string, error) {
 	username = strings.TrimSpace(username)
 	password = strings.TrimSpace(password)
 	if username == "" || password == "" {
-		return User{}, errors.New("username and password are required")
+		return User{}, "", errors.New("username and password are required")
 	}
 
 	u, err := s.repo.GetByUsername(username)
 	if err != nil {
-		return User{}, errors.New("invalid username or password")
+		return User{}, "", errors.New("invalid username or password")
 	}
 	if !u.Active {
-		return User{}, errors.New("account is inactive")
+		return User{}, "", errors.New("account is inactive")
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
-		return User{}, errors.New("invalid username or password")
+		return User{}, "", errors.New("invalid username or password")
 	}
 
-	return u, nil
+	token, err := GenerateToken(u)
+	if err != nil {
+		return User{}, "", err
+	}
+
+	return u, token, nil
 }
 
 func (s *Service) GetUser(id int) (User, error) {
@@ -102,4 +107,37 @@ func (s *Service) UpdateUser(u User) error {
 	}
 	u.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	return s.repo.Update(u)
+}
+
+func GenerateToken(u User) (string, error) {
+	return authGenerateToken(u)
+}
+
+func authGenerateToken(u User) (string, error) {
+	type claims struct {
+		UserID   int    `json:"user_id"`
+		Username string `json:"username"`
+		Role     string `json:"role"`
+		Exp      int64  `json:"exp"`
+	}
+
+	payload := claims{
+		UserID:   u.ID,
+		Username: u.Username,
+		Role:     u.Role,
+		Exp:      time.Now().Add(8 * time.Hour).Unix(),
+	}
+
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+
+	encoded := base64.RawURLEncoding.EncodeToString(b)
+	signature := hmac.New(sha256.New, []byte("payrool-dev-secret"))
+	_, err = signature.Write([]byte(encoded))
+	if err != nil {
+		return "", err
+	}
+	return encoded + "." + base64.RawURLEncoding.EncodeToString(signature.Sum(nil)), nil
 }
