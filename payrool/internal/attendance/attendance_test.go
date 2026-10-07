@@ -1,157 +1,114 @@
-package payroll
+package attendance
 
 import (
-	"encoding/json"
-	"net/http"
-	"strconv"
-	"strings"
+	"database/sql"
+	"testing"
+
+	"payrool/internal/student"
+
+	_ "modernc.org/sqlite"
 )
 
-type Handler struct {
-	service *Service
-}
+func setupAttendanceTestDB(t *testing.T) (*sql.DB, *student.Repository, *Repository) {
+	t.Helper()
 
-type calculatePayrollRequest struct {
-	StudentID   int    `json:"student_id"`
-	PeriodStart string `json:"period_start"`
-	PeriodEnd   string `json:"period_end"`
-}
-
-type calculatePayrollResponse struct {
-	ID int64 `json:"id"`
-}
-
-func NewHandler(service *Service) *Handler {
-	return &Handler{service: service}
-}
-
-func (h *Handler) CalculatePayroll(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var request calculatePayrollRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	payroll, err := h.service.CalculatePayroll(request.StudentID, request.PeriodStart, request.PeriodEnd)
+	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+		t.Fatalf("failed to open test database: %v", err)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(calculatePayrollResponse{ID: int64(payroll.ID)})
+	if _, err = db.Exec(`
+		CREATE TABLE students (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			student_no TEXT NOT NULL UNIQUE,
+			full_name TEXT NOT NULL,
+			email TEXT,
+			phone TEXT,
+			program TEXT,
+			daily_rate REAL NOT NULL,
+			active INTEGER NOT NULL DEFAULT 1
+		);
+		CREATE TABLE attendance (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			student_id INTEGER NOT NULL,
+			attendance_date TEXT NOT NULL,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			UNIQUE(student_id, attendance_date)
+		);
+	`); err != nil {
+		t.Fatalf("failed to create tables: %v", err)
+	}
+
+	t.Cleanup(func() { db.Close() })
+	return db, student.NewRepository(db), NewRepository(db)
 }
 
-func (h *Handler) GetPayroll(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+func TestCreateAttendance(t *testing.T) {
+	_, studentRepo, attendanceRepo := setupAttendanceTestDB(t)
+	service := NewService(attendanceRepo, studentRepo)
 
-	idText := strings.TrimPrefix(r.URL.Path, "/api/payroll/")
-	id, err := strconv.Atoi(idText)
-	if err != nil || id <= 0 {
-		http.Error(w, "invalid payroll ID", http.StatusBadRequest)
-		return
-	}
-
-	payroll, err := h.service.GetPayroll(id)
+	studentID, err := studentRepo.Create(student.Student{
+		StudentNo: "ATT001",
+		FullName:  "Alice Doe",
+		DailyRate: 5000,
+		Active:    true,
+	})
 	if err != nil {
-		http.Error(w, "payroll not found", http.StatusNotFound)
-		return
+		t.Fatalf("failed to create student: %v", err)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(payroll)
-}
-
-func (h *Handler) ListPayroll(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	payrolls, err := h.service.ListPayroll()
+	id, err := service.CreateAttendance(Attendance{
+		StudentID:      int(studentID),
+		AttendanceDate: "2026-10-06",
+		Status:         "present",
+	})
 	if err != nil {
-		http.Error(w, "failed to retrieve payroll", http.StatusInternalServerError)
-		return
+		t.Fatalf("failed to create attendance: %v", err)
+	}
+	if id <= 0 {
+		t.Fatalf("expected valid attendance ID, got %d", id)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(payrolls)
-}
-
-func (h *Handler) ListPayrollByStudent(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	studentIDText := strings.TrimPrefix(r.URL.Path, "/api/payroll/student/")
-	studentID, err := strconv.Atoi(studentIDText)
-	if err != nil || studentID <= 0 {
-		http.Error(w, "invalid student ID", http.StatusBadRequest)
-		return
-	}
-
-	payrolls, err := h.service.ListPayrollByStudent(studentID)
+	item, err := attendanceRepo.GetByID(int(id))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+		t.Fatalf("failed to fetch attendance: %v", err)
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(payrolls)
+	if item.Status != "present" {
+		t.Fatalf("expected present status, got %q", item.Status)
+	}
 }
 
-func (h *Handler) ApprovePayroll(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
+func TestCreateAttendanceDuplicateRejects(t *testing.T) {
+	_, studentRepo, attendanceRepo := setupAttendanceTestDB(t)
+	service := NewService(attendanceRepo, studentRepo)
+
+	studentID, err := studentRepo.Create(student.Student{
+		StudentNo: "ATT002",
+		FullName:  "Bob Doe",
+		DailyRate: 5000,
+		Active:    true,
+	})
+	if err != nil {
+		t.Fatalf("failed to create student: %v", err)
 	}
 
-	idText := strings.TrimPrefix(r.URL.Path, "/api/payroll/")
-	idText = strings.TrimSuffix(idText, "/approve")
-	id, err := strconv.Atoi(idText)
-	if err != nil || id <= 0 {
-		http.Error(w, "invalid payroll ID", http.StatusBadRequest)
-		return
+	_, err = service.CreateAttendance(Attendance{
+		StudentID:      int(studentID),
+		AttendanceDate: "2026-10-06",
+		Status:         "present",
+	})
+	if err != nil {
+		t.Fatalf("failed to insert first attendance: %v", err)
 	}
 
-	if err := h.service.UpdateStatus(id, "approved"); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	_, err = service.CreateAttendance(Attendance{
+		StudentID:      int(studentID),
+		AttendanceDate: "2026-10-06",
+		Status:         "absent",
+	})
+	if err == nil {
+		t.Fatal("expected duplicate attendance to be rejected")
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "approved"})
-}
-
-func (h *Handler) MarkPayrollPaid(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	idText := strings.TrimPrefix(r.URL.Path, "/api/payroll/")
-	idText = strings.TrimSuffix(idText, "/pay")
-	id, err := strconv.Atoi(idText)
-	if err != nil || id <= 0 {
-		http.Error(w, "invalid payroll ID", http.StatusBadRequest)
-		return
-	}
-
-	if err := h.service.UpdateStatus(id, "paid"); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "paid"})
 }

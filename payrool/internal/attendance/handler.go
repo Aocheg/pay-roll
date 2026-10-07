@@ -1,124 +1,155 @@
 package attendance
 
 import (
-	"errors"
-	"fmt"
+	"encoding/json"
+	"net/http"
+	"strconv"
 	"strings"
-	"time"
-
-	"payrool/internal/student"
 )
 
-var validStatuses = map[string]bool{
-	"present": true,
-	"absent":  true,
-	"late":    true,
-	"excused": true,
+type Handler struct {
+	service *Service
 }
 
-type Service struct {
-	repo        *Repository
-	studentRepo *student.Repository
+type createAttendanceResponse struct {
+	ID int64 `json:"id"`
 }
 
-func NewService(repo *Repository, studentRepo *student.Repository) *Service {
-	return &Service{
-		repo:        repo,
-		studentRepo: studentRepo,
-	}
+func NewHandler(service *Service) *Handler {
+	return &Handler{service: service}
 }
 
-func (s *Service) CreateAttendance(a Attendance) (int64, error) {
-	if a.StudentID <= 0 {
-		return 0, errors.New("student ID is required")
+func (h *Handler) CreateAttendance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 
-	if _, err := s.studentRepo.GetByID(a.StudentID); err != nil {
-		return 0, fmt.Errorf("student not found: %w", err)
+	var request Attendance
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
 	}
 
-	if err := validateDate(a.AttendanceDate); err != nil {
-		return 0, err
+	id, err := h.service.CreateAttendance(request)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
-	a.Status = strings.ToLower(strings.TrimSpace(a.Status))
-	if a.Status == "" {
-		return 0, errors.New("attendance status is required")
-	}
-	if !validStatuses[a.Status] {
-		return 0, errors.New("status must be one of: present, absent, late, excused")
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	a.CreatedAt = now
-	a.UpdatedAt = now
-
-	if _, err := s.repo.GetByStudentAndDate(a.StudentID, a.AttendanceDate); err == nil {
-		return 0, errors.New("attendance for this student and date already exists")
-	}
-
-	return s.repo.Create(a)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(createAttendanceResponse{ID: id})
 }
 
-func (s *Service) GetAttendance(id int) (Attendance, error) {
-	if id <= 0 {
-		return Attendance{}, errors.New("invalid attendance ID")
+func (h *Handler) ListAttendance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
-	return s.repo.GetByID(id)
+
+	attendanceList, err := h.service.ListAttendance()
+	if err != nil {
+		http.Error(w, "failed to retrieve attendance", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(attendanceList)
 }
 
-func (s *Service) ListAttendance() ([]Attendance, error) {
-	return s.repo.List()
+func (h *Handler) GetAttendance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	idText := strings.TrimPrefix(r.URL.Path, "/api/attendance/")
+	id, err := strconv.Atoi(idText)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid attendance ID", http.StatusBadRequest)
+		return
+	}
+
+	attendanceItem, err := h.service.GetAttendance(id)
+	if err != nil {
+		http.Error(w, "attendance not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(attendanceItem)
 }
 
-func (s *Service) ListAttendanceByStudent(studentID int) ([]Attendance, error) {
-	if studentID <= 0 {
-		return nil, errors.New("invalid student ID")
+func (h *Handler) ListAttendanceByStudent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
-	return s.repo.ListByStudent(studentID)
+
+	studentIDText := strings.TrimPrefix(r.URL.Path, "/api/attendance/student/")
+	studentID, err := strconv.Atoi(studentIDText)
+	if err != nil || studentID <= 0 {
+		http.Error(w, "invalid student ID", http.StatusBadRequest)
+		return
+	}
+
+	attendanceList, err := h.service.ListAttendanceByStudent(studentID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(attendanceList)
 }
 
-func (s *Service) UpdateAttendance(a Attendance) error {
-	if a.ID <= 0 {
-		return errors.New("invalid attendance ID")
+func (h *Handler) UpdateAttendance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 
-	if _, err := s.studentRepo.GetByID(a.StudentID); err != nil {
-		return fmt.Errorf("student not found: %w", err)
+	idText := strings.TrimPrefix(r.URL.Path, "/api/attendance/")
+	id, err := strconv.Atoi(idText)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid attendance ID", http.StatusBadRequest)
+		return
 	}
 
-	if err := validateDate(a.AttendanceDate); err != nil {
-		return err
+	var request Attendance
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	request.ID = id
+
+	if err := h.service.UpdateAttendance(request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
-	a.Status = strings.ToLower(strings.TrimSpace(a.Status))
-	if a.Status == "" {
-		return errors.New("attendance status is required")
-	}
-	if !validStatuses[a.Status] {
-		return errors.New("status must be one of: present, absent, late, excused")
-	}
-
-	a.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	return s.repo.Update(a)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(request)
 }
 
-func (s *Service) DeleteAttendance(id int) error {
-	if id <= 0 {
-		return errors.New("invalid attendance ID")
-	}
-	return s.repo.Delete(id)
-}
-
-func validateDate(dateText string) error {
-	dateText = strings.TrimSpace(dateText)
-	if dateText == "" {
-		return errors.New("attendance date is required")
+func (h *Handler) DeleteAttendance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 
-	if _, err := time.Parse("2006-01-02", dateText); err != nil {
-		return errors.New("attendance date must be in YYYY-MM-DD format")
+	idText := strings.TrimPrefix(r.URL.Path, "/api/attendance/")
+	id, err := strconv.Atoi(idText)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid attendance ID", http.StatusBadRequest)
+		return
 	}
 
-	return nil
+	if err := h.service.DeleteAttendance(id); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }

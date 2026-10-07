@@ -1,296 +1,180 @@
 package payroll
 
 import (
-	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
 	"time"
+
+	"payrool/internal/attendance"
+	"payrool/internal/eligibility"
+	"payrool/internal/student"
 )
 
-type Repository struct {
-	db *sql.DB
+type Service struct {
+	repo           *Repository
+	attendanceRepo *attendance.Repository
+	studentRepo    *student.Repository
 }
 
-func NewRepository(db *sql.DB) *Repository {
-	return &Repository{db: db}
+func NewService(repo *Repository, attendanceRepo *attendance.Repository, studentRepo *student.Repository) *Service {
+	return &Service{repo: repo, attendanceRepo: attendanceRepo, studentRepo: studentRepo}
 }
 
-func (r *Repository) Create(p Payroll) (int64, error) {
-	query := `
-		INSERT INTO payroll (
-			student_id,
-			period_start,
-			period_end,
-			expected_days,
-			present_days,
-			attendance_percentage,
-			eligible,
-			daily_rate,
-			payable_days,
-			gross_amount,
-			payment_status,
-			processed_at,
-			created_at,
-			updated_at
-		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`
-
-	result, err := r.db.Exec(
-		query,
-		p.StudentID,
-		p.PeriodStart,
-		p.PeriodEnd,
-		p.ExpectedDays,
-		p.PresentDays,
-		p.AttendancePercentage,
-		p.Eligible,
-		p.DailyRate,
-		p.PayableDays,
-		p.GrossAmount,
-		p.PaymentStatus,
-		p.ProcessedAt,
-		p.CreatedAt,
-		p.UpdatedAt,
-	)
-	if err != nil {
-		return 0, err
+func (s *Service) CalculatePayroll(studentID int, periodStart, periodEnd string) (Payroll, error) {
+	if studentID <= 0 {
+		return Payroll{}, errors.New("invalid student ID")
 	}
-
-	id, err := result.LastInsertId()
-	if err != nil {
-		return 0, err
-	}
-
-	return id, nil
-}
-
-func (r *Repository) GetByID(id int) (Payroll, error) {
-	query := `
-		SELECT
-			id,
-			student_id,
-			period_start,
-			period_end,
-			expected_days,
-			present_days,
-			attendance_percentage,
-			eligible,
-			daily_rate,
-			payable_days,
-			gross_amount,
-			payment_status,
-			processed_at,
-			created_at,
-			updated_at
-		FROM payroll
-		WHERE id = ?
-	`
-
-	var p Payroll
-	err := r.db.QueryRow(query, id).Scan(
-		&p.ID,
-		&p.StudentID,
-		&p.PeriodStart,
-		&p.PeriodEnd,
-		&p.ExpectedDays,
-		&p.PresentDays,
-		&p.AttendancePercentage,
-		&p.Eligible,
-		&p.DailyRate,
-		&p.PayableDays,
-		&p.GrossAmount,
-		&p.PaymentStatus,
-		&p.ProcessedAt,
-		&p.CreatedAt,
-		&p.UpdatedAt,
-	)
-	if err != nil {
+	if err := validateDateRange(periodStart, periodEnd); err != nil {
 		return Payroll{}, err
 	}
 
-	return p, nil
-}
-
-func (r *Repository) List() ([]Payroll, error) {
-	query := `
-		SELECT
-			id,
-			student_id,
-			period_start,
-			period_end,
-			expected_days,
-			present_days,
-			attendance_percentage,
-			eligible,
-			daily_rate,
-			payable_days,
-			gross_amount,
-			payment_status,
-			processed_at,
-			created_at,
-			updated_at
-		FROM payroll
-		ORDER BY id ASC
-	`
-
-	rows, err := r.db.Query(query)
+	student, err := s.studentRepo.GetByID(studentID)
 	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	payrolls := make([]Payroll, 0)
-	for rows.Next() {
-		var p Payroll
-		err := rows.Scan(
-			&p.ID,
-			&p.StudentID,
-			&p.PeriodStart,
-			&p.PeriodEnd,
-			&p.ExpectedDays,
-			&p.PresentDays,
-			&p.AttendancePercentage,
-			&p.Eligible,
-			&p.DailyRate,
-			&p.PayableDays,
-			&p.GrossAmount,
-			&p.PaymentStatus,
-			&p.ProcessedAt,
-			&p.CreatedAt,
-			&p.UpdatedAt,
-		)
-		if err != nil {
-			return nil, err
-		}
-		payrolls = append(payrolls, p)
+		return Payroll{}, fmt.Errorf("student not found: %w", err)
 	}
 
-	if err := rows.Err(); err != nil {
-		return nil, err
+	if _, err := s.repo.GetByStudentAndPeriod(studentID, periodStart, periodEnd); err == nil {
+		return Payroll{}, errors.New("payroll already exists for this student and period")
 	}
 
-	return payrolls, nil
-}
-
-func (r *Repository) ListByStudent(studentID int) ([]Payroll, error) {
-	query := `
-		SELECT
-			id,
-			student_id,
-			period_start,
-			period_end,
-			expected_days,
-			present_days,
-			attendance_percentage,
-			eligible,
-			daily_rate,
-			payable_days,
-			gross_amount,
-			payment_status,
-			processed_at,
-			created_at,
-			updated_at
-		FROM payroll
-		WHERE student_id = ?
-		ORDER BY period_start DESC, id DESC
-	`
-
-	rows, err := r.db.Query(query, studentID)
+	attendanceList, err := s.attendanceRepo.ListByStudent(studentID)
 	if err != nil {
-		return nil, err
+		return Payroll{}, fmt.Errorf("failed to retrieve attendance: %w", err)
 	}
-	defer rows.Close()
 
-	payrolls := make([]Payroll, 0)
-	for rows.Next() {
-		var p Payroll
-		err := rows.Scan(
-			&p.ID,
-			&p.StudentID,
-			&p.PeriodStart,
-			&p.PeriodEnd,
-			&p.ExpectedDays,
-			&p.PresentDays,
-			&p.AttendancePercentage,
-			&p.Eligible,
-			&p.DailyRate,
-			&p.PayableDays,
-			&p.GrossAmount,
-			&p.PaymentStatus,
-			&p.ProcessedAt,
-			&p.CreatedAt,
-			&p.UpdatedAt,
-		)
-		if err != nil {
-			return nil, err
+	expectedDays := countExpectedDays(periodStart, periodEnd)
+	presentDays := 0
+	for _, record := range attendanceList {
+		if isWithinPeriod(record.AttendanceDate, periodStart, periodEnd) {
+			if strings.EqualFold(record.Status, "present") || strings.EqualFold(record.Status, "late") || strings.EqualFold(record.Status, "excused") {
+				presentDays++
+			}
 		}
-		payrolls = append(payrolls, p)
 	}
 
-	if err := rows.Err(); err != nil {
-		return nil, err
+	attendancePercentage := 0.0
+	if expectedDays > 0 {
+		attendancePercentage = (float64(presentDays) / float64(expectedDays)) * 100
 	}
 
-	return payrolls, nil
-}
+	eligible := eligibility.IsEligible(attendancePercentage)
+	payableDays := 0
+	grossAmount := 0.0
+	if eligible {
+		payableDays = presentDays
+		grossAmount = float64(payableDays) * student.DailyRate
+	}
 
-func (r *Repository) GetByStudentAndPeriod(studentID int, periodStart, periodEnd string) (Payroll, error) {
-	query := `
-		SELECT
-			id,
-			student_id,
-			period_start,
-			period_end,
-			expected_days,
-			present_days,
-			attendance_percentage,
-			eligible,
-			daily_rate,
-			payable_days,
-			gross_amount,
-			payment_status,
-			processed_at,
-			created_at,
-			updated_at
-		FROM payroll
-		WHERE student_id = ? AND period_start = ? AND period_end = ?
-	`
+	now := time.Now().UTC().Format(time.RFC3339)
+	payroll := Payroll{
+		StudentID:            studentID,
+		PeriodStart:          periodStart,
+		PeriodEnd:            periodEnd,
+		ExpectedDays:         expectedDays,
+		PresentDays:          presentDays,
+		AttendancePercentage: attendancePercentage,
+		Eligible:             eligible,
+		DailyRate:            student.DailyRate,
+		PayableDays:          payableDays,
+		GrossAmount:          grossAmount,
+		PaymentStatus:        "pending",
+		ProcessedAt:          "",
+		CreatedAt:            now,
+		UpdatedAt:            now,
+	}
 
-	var p Payroll
-	err := r.db.QueryRow(query, studentID, periodStart, periodEnd).Scan(
-		&p.ID,
-		&p.StudentID,
-		&p.PeriodStart,
-		&p.PeriodEnd,
-		&p.ExpectedDays,
-		&p.PresentDays,
-		&p.AttendancePercentage,
-		&p.Eligible,
-		&p.DailyRate,
-		&p.PayableDays,
-		&p.GrossAmount,
-		&p.PaymentStatus,
-		&p.ProcessedAt,
-		&p.CreatedAt,
-		&p.UpdatedAt,
-	)
+	id, err := s.repo.Create(payroll)
 	if err != nil {
 		return Payroll{}, err
 	}
-
-	return p, nil
+	payroll.ID = int(id)
+	return payroll, nil
 }
 
-func (r *Repository) UpdateStatus(id int, status string) error {
-	query := `
-		UPDATE payroll
-		SET payment_status = ?, updated_at = ?
-		WHERE id = ?
-	`
-	_, err := r.db.Exec(query, status, time.Now().UTC().Format(time.RFC3339), id)
-	return err
+func (s *Service) GetPayroll(id int) (Payroll, error) {
+	if id <= 0 {
+		return Payroll{}, errors.New("invalid payroll ID")
+	}
+	return s.repo.GetByID(id)
 }
 
-func (r *Repository) Delete(id int) error {
-	_, err := r.db.Exec("DELETE FROM payroll WHERE id = ?", id)
-	return err
+func (s *Service) ListPayroll() ([]Payroll, error) {
+	return s.repo.List()
+}
+
+func (s *Service) ListPayrollByStudent(studentID int) ([]Payroll, error) {
+	if studentID <= 0 {
+		return nil, errors.New("invalid student ID")
+	}
+	return s.repo.ListByStudent(studentID)
+}
+
+func (s *Service) UpdateStatus(id int, status string) error {
+	if id <= 0 {
+		return errors.New("invalid payroll ID")
+	}
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "" {
+		return errors.New("payment status is required")
+	}
+
+	allowed := map[string]bool{
+		"pending":  true,
+		"approved": true,
+		"paid":     true,
+		"rejected": true,
+	}
+	if !allowed[status] {
+		return errors.New("status must be one of: pending, approved, paid, rejected")
+	}
+	return s.repo.UpdateStatus(id, status)
+}
+
+func validateDateRange(periodStart, periodEnd string) error {
+	if strings.TrimSpace(periodStart) == "" || strings.TrimSpace(periodEnd) == "" {
+		return errors.New("period start and end dates are required")
+	}
+
+	start, err := time.Parse("2006-01-02", periodStart)
+	if err != nil {
+		return errors.New("period start must be in YYYY-MM-DD format")
+	}
+	end, err := time.Parse("2006-01-02", periodEnd)
+	if err != nil {
+		return errors.New("period end must be in YYYY-MM-DD format")
+	}
+	if end.Before(start) {
+		return errors.New("period end must be on or after period start")
+	}
+	return nil
+}
+
+func countExpectedDays(periodStart, periodEnd string) int {
+	start, err := time.Parse("2006-01-02", periodStart)
+	if err != nil {
+		return 0
+	}
+	end, err := time.Parse("2006-01-02", periodEnd)
+	if err != nil {
+		return 0
+	}
+
+	return int(end.Sub(start).Hours()/24) + 1
+}
+
+func isWithinPeriod(dateText, periodStart, periodEnd string) bool {
+	date, err := time.Parse("2006-01-02", dateText)
+	if err != nil {
+		return false
+	}
+	start, err := time.Parse("2006-01-02", periodStart)
+	if err != nil {
+		return false
+	}
+	end, err := time.Parse("2006-01-02", periodEnd)
+	if err != nil {
+		return false
+	}
+	return !date.Before(start) && !date.After(end)
 }

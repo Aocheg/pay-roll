@@ -1,143 +1,136 @@
 package user
 
 import (
-	"errors"
+	"encoding/json"
+	"net/http"
+	"strconv"
 	"strings"
-	"time"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
-type Service struct {
-	repo *Repository
+type Handler struct {
+	service *Service
 }
 
-func NewService(repo *Repository) *Service {
-	return &Service{repo: repo}
+type registerRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	FullName string `json:"full_name"`
+	Email    string `json:"email"`
+	Role     string `json:"role"`
 }
 
-func (s *Service) RegisterUser(u User, password string) (int64, error) {
-	u.Username = strings.TrimSpace(u.Username)
-	u.FullName = strings.TrimSpace(u.FullName)
-	u.Email = strings.TrimSpace(u.Email)
-	u.Role = strings.TrimSpace(u.Role)
-	password = strings.TrimSpace(password)
+type loginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
 
-	if u.Username == "" {
-		return 0, errors.New("username is required")
-	}
-	if u.FullName == "" {
-		return 0, errors.New("full name is required")
-	}
-	if password == "" {
-		return 0, errors.New("password is required")
-	}
-	if u.Role == "" {
-		u.Role = "staff"
+type registerResponse struct {
+	ID int64 `json:"id"`
+}
+
+type loginResponse struct {
+	Token    string `json:"token"`
+	Username string `json:"username"`
+	Role     string `json:"role"`
+	FullName string `json:"full_name"`
+}
+
+func NewHandler(service *Service) *Handler {
+	return &Handler{service: service}
+}
+
+func (h *Handler) RegisterUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	var request registerRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	user := User{
+		Username: request.Username,
+		FullName: request.FullName,
+		Email:    request.Email,
+		Role:     request.Role,
+	}
+
+	id, err := h.service.RegisterUser(user, request.Password)
 	if err != nil {
-		return 0, err
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
-	u.PasswordHash = string(hash)
-	u.Active = true
-	u.CreatedAt = now
-	u.UpdatedAt = now
-
-	return s.repo.Create(u)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(registerResponse{ID: id})
 }
 
-func (s *Service) Login(username, password string) (User, string, error) {
-	username = strings.TrimSpace(username)
-	password = strings.TrimSpace(password)
-	if username == "" || password == "" {
-		return User{}, "", errors.New("username and password are required")
+func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 
-	u, err := s.repo.GetByUsername(username)
+	var request loginRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	u, token, err := h.service.Login(request.Username, request.Password)
 	if err != nil {
-		return User{}, "", errors.New("invalid username or password")
-	}
-	if !u.Active {
-		return User{}, "", errors.New("account is inactive")
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
-		return User{}, "", errors.New("invalid username or password")
-	}
-
-	token, err := GenerateToken(u)
-	if err != nil {
-		return User{}, "", err
-	}
-
-	return u, token, nil
-}
-
-func (s *Service) GetUser(id int) (User, error) {
-	if id <= 0 {
-		return User{}, errors.New("invalid user ID")
-	}
-	return s.repo.GetByID(id)
-}
-
-func (s *Service) ListUsers() ([]User, error) {
-	return s.repo.List()
-}
-
-func (s *Service) UpdateUser(u User) error {
-	if u.ID <= 0 {
-		return errors.New("invalid user ID")
-	}
-	u.Username = strings.TrimSpace(u.Username)
-	u.FullName = strings.TrimSpace(u.FullName)
-	u.Email = strings.TrimSpace(u.Email)
-	u.Role = strings.TrimSpace(u.Role)
-	if u.Username == "" {
-		return errors.New("username is required")
-	}
-	if u.FullName == "" {
-		return errors.New("full name is required")
-	}
-	if u.Role == "" {
-		u.Role = "staff"
-	}
-	u.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	return s.repo.Update(u)
-}
-
-func GenerateToken(u User) (string, error) {
-	return authGenerateToken(u)
-}
-
-func authGenerateToken(u User) (string, error) {
-	type claims struct {
-		UserID   int    `json:"user_id"`
-		Username string `json:"username"`
-		Role     string `json:"role"`
-		Exp      int64  `json:"exp"`
-	}
-
-	payload := claims{
-		UserID:   u.ID,
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(loginResponse{
+		Token:    token,
 		Username: u.Username,
 		Role:     u.Role,
-		Exp:      time.Now().Add(8 * time.Hour).Unix(),
+		FullName: u.FullName,
+	})
+}
+
+func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 
-	b, err := json.Marshal(payload)
+	users, err := h.service.ListUsers()
 	if err != nil {
-		return "", err
+		http.Error(w, "failed to retrieve users", http.StatusInternalServerError)
+		return
 	}
 
-	encoded := base64.RawURLEncoding.EncodeToString(b)
-	signature := hmac.New(sha256.New, []byte("payrool-dev-secret"))
-	_, err = signature.Write([]byte(encoded))
-	if err != nil {
-		return "", err
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(users)
+}
+
+func (h *Handler) GetUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
-	return encoded + "." + base64.RawURLEncoding.EncodeToString(signature.Sum(nil)), nil
+
+	idText := strings.TrimPrefix(r.URL.Path, "/api/users/")
+	id, err := strconv.Atoi(idText)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid user ID", http.StatusBadRequest)
+		return
+	}
+
+	u, err := h.service.GetUser(id)
+	if err != nil {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(u)
 }

@@ -1,219 +1,124 @@
 package attendance
 
-import "database/sql"
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"time"
 
-type Repository struct {
-	db *sql.DB
+	"payrool/internal/student"
+)
+
+var validStatuses = map[string]bool{
+	"present": true,
+	"absent":  true,
+	"late":    true,
+	"excused": true,
 }
 
-func NewRepository(db *sql.DB) *Repository {
-	return &Repository{db: db}
+type Service struct {
+	repo        *Repository
+	studentRepo *student.Repository
 }
 
-func (r *Repository) Create(a Attendance) (int64, error) {
-	query := `
-		INSERT INTO attendance (
-			student_id,
-			attendance_date,
-			status,
-			created_at,
-			updated_at
-		)
-		VALUES (?, ?, ?, ?, ?)
-	`
+func NewService(repo *Repository, studentRepo *student.Repository) *Service {
+	return &Service{
+		repo:        repo,
+		studentRepo: studentRepo,
+	}
+}
 
-	result, err := r.db.Exec(
-		query,
-		a.StudentID,
-		a.AttendanceDate,
-		a.Status,
-		a.CreatedAt,
-		a.UpdatedAt,
-	)
-	if err != nil {
+func (s *Service) CreateAttendance(a Attendance) (int64, error) {
+	if a.StudentID <= 0 {
+		return 0, errors.New("student ID is required")
+	}
+
+	if _, err := s.studentRepo.GetByID(a.StudentID); err != nil {
+		return 0, fmt.Errorf("student not found: %w", err)
+	}
+
+	if err := validateDate(a.AttendanceDate); err != nil {
 		return 0, err
 	}
 
-	id, err := result.LastInsertId()
-	if err != nil {
-		return 0, err
+	a.Status = strings.ToLower(strings.TrimSpace(a.Status))
+	if a.Status == "" {
+		return 0, errors.New("attendance status is required")
+	}
+	if !validStatuses[a.Status] {
+		return 0, errors.New("status must be one of: present, absent, late, excused")
 	}
 
-	return id, nil
+	now := time.Now().UTC().Format(time.RFC3339)
+	a.CreatedAt = now
+	a.UpdatedAt = now
+
+	if _, err := s.repo.GetByStudentAndDate(a.StudentID, a.AttendanceDate); err == nil {
+		return 0, errors.New("attendance for this student and date already exists")
+	}
+
+	return s.repo.Create(a)
 }
 
-func (r *Repository) GetByID(id int) (Attendance, error) {
-	query := `
-		SELECT
-			id,
-			student_id,
-			attendance_date,
-			status,
-			created_at,
-			updated_at
-		FROM attendance
-		WHERE id = ?
-	`
-
-	var a Attendance
-
-	err := r.db.QueryRow(query, id).Scan(
-		&a.ID,
-		&a.StudentID,
-		&a.AttendanceDate,
-		&a.Status,
-		&a.CreatedAt,
-		&a.UpdatedAt,
-	)
-	if err != nil {
-		return Attendance{}, err
+func (s *Service) GetAttendance(id int) (Attendance, error) {
+	if id <= 0 {
+		return Attendance{}, errors.New("invalid attendance ID")
 	}
-
-	return a, nil
+	return s.repo.GetByID(id)
 }
 
-func (r *Repository) List() ([]Attendance, error) {
-	query := `
-		SELECT
-			id,
-			student_id,
-			attendance_date,
-			status,
-			created_at,
-			updated_at
-		FROM attendance
-		ORDER BY id ASC
-	`
-
-	rows, err := r.db.Query(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	attendanceList := make([]Attendance, 0)
-
-	for rows.Next() {
-		var a Attendance
-		err := rows.Scan(
-			&a.ID,
-			&a.StudentID,
-			&a.AttendanceDate,
-			&a.Status,
-			&a.CreatedAt,
-			&a.UpdatedAt,
-		)
-		if err != nil {
-			return nil, err
-		}
-		attendanceList = append(attendanceList, a)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return attendanceList, nil
+func (s *Service) ListAttendance() ([]Attendance, error) {
+	return s.repo.List()
 }
 
-func (r *Repository) ListByStudent(studentID int) ([]Attendance, error) {
-	query := `
-		SELECT
-			id,
-			student_id,
-			attendance_date,
-			status,
-			created_at,
-			updated_at
-		FROM attendance
-		WHERE student_id = ?
-		ORDER BY attendance_date ASC, id ASC
-	`
-
-	rows, err := r.db.Query(query, studentID)
-	if err != nil {
-		return nil, err
+func (s *Service) ListAttendanceByStudent(studentID int) ([]Attendance, error) {
+	if studentID <= 0 {
+		return nil, errors.New("invalid student ID")
 	}
-	defer rows.Close()
-
-	attendanceList := make([]Attendance, 0)
-
-	for rows.Next() {
-		var a Attendance
-		err := rows.Scan(
-			&a.ID,
-			&a.StudentID,
-			&a.AttendanceDate,
-			&a.Status,
-			&a.CreatedAt,
-			&a.UpdatedAt,
-		)
-		if err != nil {
-			return nil, err
-		}
-		attendanceList = append(attendanceList, a)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return attendanceList, nil
+	return s.repo.ListByStudent(studentID)
 }
 
-func (r *Repository) GetByStudentAndDate(studentID int, attendanceDate string) (Attendance, error) {
-	query := `
-		SELECT
-			id,
-			student_id,
-			attendance_date,
-			status,
-			created_at,
-			updated_at
-		FROM attendance
-		WHERE student_id = ? AND attendance_date = ?
-	`
-
-	var a Attendance
-
-	err := r.db.QueryRow(query, studentID, attendanceDate).Scan(
-		&a.ID,
-		&a.StudentID,
-		&a.AttendanceDate,
-		&a.Status,
-		&a.CreatedAt,
-		&a.UpdatedAt,
-	)
-	if err != nil {
-		return Attendance{}, err
+func (s *Service) UpdateAttendance(a Attendance) error {
+	if a.ID <= 0 {
+		return errors.New("invalid attendance ID")
 	}
 
-	return a, nil
+	if _, err := s.studentRepo.GetByID(a.StudentID); err != nil {
+		return fmt.Errorf("student not found: %w", err)
+	}
+
+	if err := validateDate(a.AttendanceDate); err != nil {
+		return err
+	}
+
+	a.Status = strings.ToLower(strings.TrimSpace(a.Status))
+	if a.Status == "" {
+		return errors.New("attendance status is required")
+	}
+	if !validStatuses[a.Status] {
+		return errors.New("status must be one of: present, absent, late, excused")
+	}
+
+	a.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return s.repo.Update(a)
 }
 
-func (r *Repository) Update(a Attendance) error {
-	query := `
-		UPDATE attendance
-		SET
-			student_id = ?,
-			attendance_date = ?,
-			status = ?,
-			updated_at = ?
-		WHERE id = ?
-	`
-
-	_, err := r.db.Exec(
-		query,
-		a.StudentID,
-		a.AttendanceDate,
-		a.Status,
-		a.UpdatedAt,
-		a.ID,
-	)
-	return err
+func (s *Service) DeleteAttendance(id int) error {
+	if id <= 0 {
+		return errors.New("invalid attendance ID")
+	}
+	return s.repo.Delete(id)
 }
 
-func (r *Repository) Delete(id int) error {
-	_, err := r.db.Exec("DELETE FROM attendance WHERE id = ?", id)
-	return err
+func validateDate(dateText string) error {
+	dateText = strings.TrimSpace(dateText)
+	if dateText == "" {
+		return errors.New("attendance date is required")
+	}
+
+	if _, err := time.Parse("2006-01-02", dateText); err != nil {
+		return errors.New("attendance date must be in YYYY-MM-DD format")
+	}
+
+	return nil
 }

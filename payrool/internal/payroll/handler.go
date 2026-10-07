@@ -1,180 +1,157 @@
 package payroll
 
 import (
-	"errors"
-	"fmt"
+	"encoding/json"
+	"net/http"
+	"strconv"
 	"strings"
-	"time"
-
-	"payrool/internal/attendance"
-	"payrool/internal/eligibility"
-	"payrool/internal/student"
 )
 
-type Service struct {
-	repo           *Repository
-	attendanceRepo *attendance.Repository
-	studentRepo    *student.Repository
+type Handler struct {
+	service *Service
 }
 
-func NewService(repo *Repository, attendanceRepo *attendance.Repository, studentRepo *student.Repository) *Service {
-	return &Service{repo: repo, attendanceRepo: attendanceRepo, studentRepo: studentRepo}
+type calculatePayrollRequest struct {
+	StudentID   int    `json:"student_id"`
+	PeriodStart string `json:"period_start"`
+	PeriodEnd   string `json:"period_end"`
 }
 
-func (s *Service) CalculatePayroll(studentID int, periodStart, periodEnd string) (Payroll, error) {
-	if studentID <= 0 {
-		return Payroll{}, errors.New("invalid student ID")
-	}
-	if err := validateDateRange(periodStart, periodEnd); err != nil {
-		return Payroll{}, err
-	}
-
-	student, err := s.studentRepo.GetByID(studentID)
-	if err != nil {
-		return Payroll{}, fmt.Errorf("student not found: %w", err)
-	}
-
-	if _, err := s.repo.GetByStudentAndPeriod(studentID, periodStart, periodEnd); err == nil {
-		return Payroll{}, errors.New("payroll already exists for this student and period")
-	}
-
-	attendanceList, err := s.attendanceRepo.ListByStudent(studentID)
-	if err != nil {
-		return Payroll{}, fmt.Errorf("failed to retrieve attendance: %w", err)
-	}
-
-	expectedDays := countExpectedDays(periodStart, periodEnd)
-	presentDays := 0
-	for _, record := range attendanceList {
-		if isWithinPeriod(record.AttendanceDate, periodStart, periodEnd) {
-			if strings.EqualFold(record.Status, "present") || strings.EqualFold(record.Status, "late") || strings.EqualFold(record.Status, "excused") {
-				presentDays++
-			}
-		}
-	}
-
-	attendancePercentage := 0.0
-	if expectedDays > 0 {
-		attendancePercentage = (float64(presentDays) / float64(expectedDays)) * 100
-	}
-
-	eligible := eligibility.IsEligible(attendancePercentage)
-	payableDays := 0
-	grossAmount := 0.0
-	if eligible {
-		payableDays = presentDays
-		grossAmount = float64(payableDays) * student.DailyRate
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	payroll := Payroll{
-		StudentID:            studentID,
-		PeriodStart:          periodStart,
-		PeriodEnd:            periodEnd,
-		ExpectedDays:         expectedDays,
-		PresentDays:          presentDays,
-		AttendancePercentage: attendancePercentage,
-		Eligible:             eligible,
-		DailyRate:            student.DailyRate,
-		PayableDays:          payableDays,
-		GrossAmount:          grossAmount,
-		PaymentStatus:        "pending",
-		ProcessedAt:          "",
-		CreatedAt:            now,
-		UpdatedAt:            now,
-	}
-
-	id, err := s.repo.Create(payroll)
-	if err != nil {
-		return Payroll{}, err
-	}
-	payroll.ID = int(id)
-	return payroll, nil
+type calculatePayrollResponse struct {
+	ID int64 `json:"id"`
 }
 
-func (s *Service) GetPayroll(id int) (Payroll, error) {
-	if id <= 0 {
-		return Payroll{}, errors.New("invalid payroll ID")
-	}
-	return s.repo.GetByID(id)
+func NewHandler(service *Service) *Handler {
+	return &Handler{service: service}
 }
 
-func (s *Service) ListPayroll() ([]Payroll, error) {
-	return s.repo.List()
+func (h *Handler) CalculatePayroll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request calculatePayrollRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	payroll, err := h.service.CalculatePayroll(request.StudentID, request.PeriodStart, request.PeriodEnd)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(calculatePayrollResponse{ID: int64(payroll.ID)})
 }
 
-func (s *Service) ListPayrollByStudent(studentID int) ([]Payroll, error) {
-	if studentID <= 0 {
-		return nil, errors.New("invalid student ID")
+func (h *Handler) GetPayroll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
-	return s.repo.ListByStudent(studentID)
+
+	idText := strings.TrimPrefix(r.URL.Path, "/api/payroll/")
+	id, err := strconv.Atoi(idText)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid payroll ID", http.StatusBadRequest)
+		return
+	}
+
+	payroll, err := h.service.GetPayroll(id)
+	if err != nil {
+		http.Error(w, "payroll not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(payroll)
 }
 
-func (s *Service) UpdateStatus(id int, status string) error {
-	if id <= 0 {
-		return errors.New("invalid payroll ID")
-	}
-	status = strings.ToLower(strings.TrimSpace(status))
-	if status == "" {
-		return errors.New("payment status is required")
+func (h *Handler) ListPayroll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 
-	allowed := map[string]bool{
-		"pending":  true,
-		"approved": true,
-		"paid":     true,
-		"rejected": true,
+	payrolls, err := h.service.ListPayroll()
+	if err != nil {
+		http.Error(w, "failed to retrieve payroll", http.StatusInternalServerError)
+		return
 	}
-	if !allowed[status] {
-		return errors.New("status must be one of: pending, approved, paid, rejected")
-	}
-	return s.repo.UpdateStatus(id, status)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(payrolls)
 }
 
-func validateDateRange(periodStart, periodEnd string) error {
-	if strings.TrimSpace(periodStart) == "" || strings.TrimSpace(periodEnd) == "" {
-		return errors.New("period start and end dates are required")
+func (h *Handler) ListPayrollByStudent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 
-	start, err := time.Parse("2006-01-02", periodStart)
+	studentIDText := strings.TrimPrefix(r.URL.Path, "/api/payroll/student/")
+	studentID, err := strconv.Atoi(studentIDText)
+	if err != nil || studentID <= 0 {
+		http.Error(w, "invalid student ID", http.StatusBadRequest)
+		return
+	}
+
+	payrolls, err := h.service.ListPayrollByStudent(studentID)
 	if err != nil {
-		return errors.New("period start must be in YYYY-MM-DD format")
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
-	end, err := time.Parse("2006-01-02", periodEnd)
-	if err != nil {
-		return errors.New("period end must be in YYYY-MM-DD format")
-	}
-	if end.Before(start) {
-		return errors.New("period end must be on or after period start")
-	}
-	return nil
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(payrolls)
 }
 
-func countExpectedDays(periodStart, periodEnd string) int {
-	start, err := time.Parse("2006-01-02", periodStart)
-	if err != nil {
-		return 0
-	}
-	end, err := time.Parse("2006-01-02", periodEnd)
-	if err != nil {
-		return 0
+func (h *Handler) ApprovePayroll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 
-	return int(end.Sub(start).Hours()/24) + 1
+	idText := strings.TrimPrefix(r.URL.Path, "/api/payroll/")
+	idText = strings.TrimSuffix(idText, "/approve")
+	id, err := strconv.Atoi(idText)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid payroll ID", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.service.UpdateStatus(id, "approved"); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "approved"})
 }
 
-func isWithinPeriod(dateText, periodStart, periodEnd string) bool {
-	date, err := time.Parse("2006-01-02", dateText)
-	if err != nil {
-		return false
+func (h *Handler) MarkPayrollPaid(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
-	start, err := time.Parse("2006-01-02", periodStart)
-	if err != nil {
-		return false
+
+	idText := strings.TrimPrefix(r.URL.Path, "/api/payroll/")
+	idText = strings.TrimSuffix(idText, "/pay")
+	id, err := strconv.Atoi(idText)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid payroll ID", http.StatusBadRequest)
+		return
 	}
-	end, err := time.Parse("2006-01-02", periodEnd)
-	if err != nil {
-		return false
+
+	if err := h.service.UpdateStatus(id, "paid"); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
-	return !date.Before(start) && !date.After(end)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "paid"})
 }

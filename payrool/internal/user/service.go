@@ -1,198 +1,110 @@
 package user
 
-import "database/sql"
+import (
+	"errors"
+	"strings"
+	"time"
 
-type Repository struct {
-	db *sql.DB
+	"golang.org/x/crypto/bcrypt"
+)
+
+type Service struct {
+	repo *Repository
 }
 
-func NewRepository(db *sql.DB) *Repository {
-	return &Repository{db: db}
+func NewService(repo *Repository) *Service {
+	return &Service{repo: repo}
 }
 
-func (r *Repository) Create(u User) (int64, error) {
-	query := `
-		INSERT INTO users (
-			username,
-			password_hash,
-			full_name,
-			email,
-			role,
-			active,
-			created_at,
-			updated_at
-		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`
+func (s *Service) RegisterUser(u User, password string) (int64, error) {
+	u.Username = strings.TrimSpace(u.Username)
+	u.FullName = strings.TrimSpace(u.FullName)
+	u.Email = strings.TrimSpace(u.Email)
+	u.Role = strings.TrimSpace(u.Role)
+	password = strings.TrimSpace(password)
 
-	result, err := r.db.Exec(
-		query,
-		u.Username,
-		u.PasswordHash,
-		u.FullName,
-		u.Email,
-		u.Role,
-		u.Active,
-		u.CreatedAt,
-		u.UpdatedAt,
-	)
+	if u.Username == "" {
+		return 0, errors.New("username is required")
+	}
+	if u.FullName == "" {
+		return 0, errors.New("full name is required")
+	}
+	if password == "" {
+		return 0, errors.New("password is required")
+	}
+	if u.Role == "" {
+		u.Role = "staff"
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return 0, err
 	}
 
-	id, err := result.LastInsertId()
+	now := time.Now().UTC().Format(time.RFC3339)
+	u.PasswordHash = string(hash)
+	u.Active = true
+	u.CreatedAt = now
+	u.UpdatedAt = now
+
+	return s.repo.Create(u)
+}
+
+func (s *Service) Login(username, password string) (User, string, error) {
+	username = strings.TrimSpace(username)
+	password = strings.TrimSpace(password)
+	if username == "" || password == "" {
+		return User{}, "", errors.New("username and password are required")
+	}
+
+	u, err := s.repo.GetByUsername(username)
 	if err != nil {
-		return 0, err
+		return User{}, "", errors.New("invalid username or password")
+	}
+	if !u.Active {
+		return User{}, "", errors.New("account is inactive")
 	}
 
-	return id, nil
-}
-
-func (r *Repository) GetByID(id int) (User, error) {
-	query := `
-		SELECT
-			id,
-			username,
-			password_hash,
-			full_name,
-			email,
-			role,
-			active,
-			created_at,
-			updated_at
-		FROM users
-		WHERE id = ?
-	`
-
-	var u User
-	if err := r.db.QueryRow(query, id).Scan(
-		&u.ID,
-		&u.Username,
-		&u.PasswordHash,
-		&u.FullName,
-		&u.Email,
-		&u.Role,
-		&u.Active,
-		&u.CreatedAt,
-		&u.UpdatedAt,
-	); err != nil {
-		return User{}, err
+	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
+		return User{}, "", errors.New("invalid username or password")
 	}
 
-	return u, nil
-}
-
-func (r *Repository) GetByUsername(username string) (User, error) {
-	query := `
-		SELECT
-			id,
-			username,
-			password_hash,
-			full_name,
-			email,
-			role,
-			active,
-			created_at,
-			updated_at
-		FROM users
-		WHERE username = ?
-	`
-
-	var u User
-	if err := r.db.QueryRow(query, username).Scan(
-		&u.ID,
-		&u.Username,
-		&u.PasswordHash,
-		&u.FullName,
-		&u.Email,
-		&u.Role,
-		&u.Active,
-		&u.CreatedAt,
-		&u.UpdatedAt,
-	); err != nil {
-		return User{}, err
-	}
-
-	return u, nil
-}
-
-func (r *Repository) List() ([]User, error) {
-	query := `
-		SELECT
-			id,
-			username,
-			password_hash,
-			full_name,
-			email,
-			role,
-			active,
-			created_at,
-			updated_at
-		FROM users
-		ORDER BY id ASC
-	`
-
-	rows, err := r.db.Query(query)
+	token, err := GenerateToken(u)
 	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	users := make([]User, 0)
-	for rows.Next() {
-		var u User
-		if err := rows.Scan(
-			&u.ID,
-			&u.Username,
-			&u.PasswordHash,
-			&u.FullName,
-			&u.Email,
-			&u.Role,
-			&u.Active,
-			&u.CreatedAt,
-			&u.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		users = append(users, u)
+		return User{}, "", err
 	}
 
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return users, nil
+	return u, token, nil
 }
 
-func (r *Repository) Update(u User) error {
-	query := `
-		UPDATE users
-		SET
-			username = ?,
-			password_hash = ?,
-			full_name = ?,
-			email = ?,
-			role = ?,
-			active = ?,
-			updated_at = ?
-		WHERE id = ?
-	`
-
-	_, err := r.db.Exec(
-		query,
-		u.Username,
-		u.PasswordHash,
-		u.FullName,
-		u.Email,
-		u.Role,
-		u.Active,
-		u.UpdatedAt,
-		u.ID,
-	)
-	return err
+func (s *Service) GetUser(id int) (User, error) {
+	if id <= 0 {
+		return User{}, errors.New("invalid user ID")
+	}
+	return s.repo.GetByID(id)
 }
 
-func (r *Repository) Delete(id int) error {
-	_, err := r.db.Exec("DELETE FROM users WHERE id = ?", id)
-	return err
+func (s *Service) ListUsers() ([]User, error) {
+	return s.repo.List()
+}
+
+func (s *Service) UpdateUser(u User) error {
+	if u.ID <= 0 {
+		return errors.New("invalid user ID")
+	}
+	u.Username = strings.TrimSpace(u.Username)
+	u.FullName = strings.TrimSpace(u.FullName)
+	u.Email = strings.TrimSpace(u.Email)
+	u.Role = strings.TrimSpace(u.Role)
+	if u.Username == "" {
+		return errors.New("username is required")
+	}
+	if u.FullName == "" {
+		return errors.New("full name is required")
+	}
+	if u.Role == "" {
+		u.Role = "staff"
+	}
+	u.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return s.repo.Update(u)
 }
