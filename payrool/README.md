@@ -1,7 +1,7 @@
 🎓 Payrool — Student Payroll Management System
 A RESTful API for managing student payroll based on attendance tracking. Built with Go, using a SQLite database and a clean layered architecture (handler → service → repository).
 
-📋 Table of Contents
+📋 Table of Contents.
 Overview
 Features
 Project Structure
@@ -14,7 +14,6 @@ Overview
 Payrool automates the process of calculating student stipends or allowances based on their attendance records. It supports role-based access control so that admins, managers, attendance officers, and staff each have appropriate access levels.
 
 How it works:
-
 Register students with a daily rate
 Record daily attendance for each student
 Calculate payroll for a given period — the system checks attendance percentage and eligibility automatically
