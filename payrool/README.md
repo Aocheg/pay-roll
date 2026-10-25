@@ -1,7 +1,7 @@
 🎓 Payrool — Student Payroll Management System
 A RESTful API for managing student payroll based on attendance tracking. Built with Go, using a SQLite database and a clean layered architecture (handler → service → repository).
 
-📋 Table of Contents
+📋 Table of Contents.
 Overview
 Features
 Project Structure
@@ -21,7 +21,7 @@ Calculate payroll for a given period — the system checks attendance percentage
 Approve and mark payroll as paid
 A student must have at least 70% attendance in a period to be eligible for payment.
 
-Features
+Features.
 ✅ JWT-based authentication (no third-party libraries)
 ✅ Role-based access control (Admin, Manager, Attendance Officer, Staff)
 ✅ Student management (create, read, update)
@@ -72,14 +72,14 @@ Getting Started
 Prerequisites
 Go 1.21 or higher
 Installation
-# Clone the repository
+# Clone the repository.
 git clone https://github.com/yourusername/pay-roll.git
 cd pay-roll/payrool
 
-# Install dependencies
+# Install dependencies.
 go mod download
 
-# Run the server
+# Run the server.
 go run ./cmd/server
 The server will start at http://localhost:8080.
 
