@@ -1,7 +1,8 @@
-🎓 Payrool — Student Payroll Management System
+🎓 Payrool — Student Payroll Management System.
 A RESTful API for managing student payroll based on attendance tracking. Built with Go, using a SQLite database and a clean layered architecture (handler → service → repository).
 
-📋 Table of Contents.
+📋 Table of Contents
+
 Overview
 Features
 Project Structure
